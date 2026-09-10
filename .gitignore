@@ -1,0 +1,44 @@
+# Medical document storage (PHI - Never commit to git)
+backend/uploads/
+uploads/
+backend/tesseract_portable/
+tesseract_portable/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Environment and Secrets
+.env
+.env.*
+!.env.example
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+# Local MongoDB installation/data
+mongodb-bin/
+data/
+
+# Local development / temporary files
+scratch/
