@@ -35,6 +35,7 @@ class AnswerSubmission(BaseModel):
     question_order: Optional[int] = Field(None, description="Sequential order in conversation")
     input_method: Optional[str] = Field("text", description="Input method used: 'voice' or 'text'")
     language: Optional[str] = Field(None, description="Language used: 'en' or 'hi'")
+    mode: Optional[str] = Field("general", description="History mode: 'general' or 'ayush'")
 
 
 class AnswerRecord(BaseModel):
@@ -48,6 +49,7 @@ class AnswerRecord(BaseModel):
     question_order: int = 1
     input_method: str = "text"
     language: Optional[str] = None
+    mode: Optional[str] = "general"
 
 
 class InterviewSessionResponse(BaseModel):
@@ -57,6 +59,7 @@ class InterviewSessionResponse(BaseModel):
     full_name: str
     selected_language: str
     status: str  # "in_progress" or "completed"
+    history_mode: Optional[str] = "general"
     started_at: datetime
     completed_at: Optional[datetime] = None
     answers: List[AnswerRecord] = []

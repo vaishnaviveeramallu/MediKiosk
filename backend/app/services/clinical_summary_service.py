@@ -326,14 +326,48 @@ class ClinicalSummaryService:
         # --- Section 9: Social / Lifestyle History ---
         soc_answers = interview_answers.get("social_habits", []) or interview_answers.get("social_history", [])
         soc_avail = len(soc_answers) > 0
+
+        # Check for AYUSH history answers across interview sessions
+        ayush_answers_list = []
+        for s in interview_sessions:
+            for ans in s.get("answers", []):
+                if ans.get("mode") == "ayush" or ans.get("question_id", "").startswith("ayush_"):
+                    ayush_answers_list.append(ans)
+
+        ayush_lines = []
+        if ayush_answers_list:
+            from app.services.ayush_service import ayush_service
+            ayush_parsed = ayush_service.parse_ayush_clinical_data(ayush_answers_list)
+            ayush_lines = [
+                "AYUSH CLINICAL PROFILE (PATIENT-REPORTED):",
+                f"- Primary AYUSH Concern: {ayush_parsed.vikriti or 'Not specified'}",
+                f"- Agni (Digestive Fire): {ayush_parsed.agni or 'Not specified'}",
+                f"- Koshta (Bowel Nature): {ayush_parsed.koshta or 'Not specified'}",
+                f"- Ahara (Dietary Routine): {ayush_parsed.ahara or 'Not specified'}",
+                f"- Nidra (Sleep Quality): {ayush_parsed.nidra or 'Not specified'}",
+                f"- Vyayama Shakti & Vihara (Stamina): {ayush_parsed.vyayama_shakti or 'Not specified'}",
+                f"- Satva & Manasika (Mental Temperament): {ayush_parsed.manasika or 'Not specified'}",
+                f"- Samhanana (Physical Build): {ayush_parsed.dashavidha_pariksha.samhanana if ayush_parsed.dashavidha_pariksha else 'Not specified'}",
+                f"- Treatment History: {ayush_parsed.treatment_history or 'None reported'}",
+                "* Non-Diagnostic Notice: Reported constitutional traits are recorded as reported by the patient. No autonomous constitutional diagnosis (Prakriti/Vikriti) has been inferred.",
+            ]
+
+        content_parts = []
+        if soc_avail:
+            content_parts.append("\n".join(f"- {a['text']}" for a in soc_answers))
+        if ayush_lines:
+            content_parts.append("\n".join(ayush_lines))
+
+        combined_soc_content = "\n\n".join(content_parts) if content_parts else NOT_AVAILABLE_MSG
+
         sections["social_history"] = ClinicalSummarySection(
             section_id="social_history",
             section_number=9,
             title="Social / Lifestyle History",
-            content="\n".join(f"- {a['text']}" for a in soc_answers) if soc_avail else NOT_AVAILABLE_MSG,
-            items=[{"habit": a["text"]} for a in soc_answers],
-            is_available=soc_avail,
-            source_references=["Clinical Intake Interview"] if soc_avail else ["None"],
+            content=combined_soc_content,
+            items=[{"habit": a["text"]} for a in soc_answers] + ([{"ayush_profile": "\n".join(ayush_lines)}] if ayush_lines else []),
+            is_available=bool(content_parts),
+            source_references=(["Clinical Intake Interview"] if soc_avail else []) + (["AYUSH History Interview"] if ayush_lines else (["None"] if not content_parts else [])),
             requires_verification=True,
         )
 

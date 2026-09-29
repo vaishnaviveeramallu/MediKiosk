@@ -54,6 +54,28 @@ class DatabaseManager:
         await docs_collection.create_index([("patient_id", 1), ("file_hash", 1)])
         await docs_collection.create_index([("uploaded_at", -1)])
 
+        # Users collection indexes (Phase 11)
+        users_collection = self.db["users"]
+        await users_collection.create_index("username", unique=True)
+        await users_collection.create_index("user_id", unique=True)
+        await users_collection.create_index("role")
+        await users_collection.create_index("patient_id")
+
+        # Audit logs collection indexes (Phase 12)
+        audit_collection = self.db["audit_logs"]
+        await audit_collection.create_index("event_id", unique=True)
+        await audit_collection.create_index("actor_user_id")
+        await audit_collection.create_index("patient_id")
+        await audit_collection.create_index("action")
+        await audit_collection.create_index([("timestamp", -1)])
+
+        # Consent records collection indexes (Phase 12)
+        consent_collection = self.db["consent_records"]
+        await consent_collection.create_index("consent_id", unique=True)
+        await consent_collection.create_index("patient_id")
+        await consent_collection.create_index("status")
+        await consent_collection.create_index([("timestamp", -1)])
+
         logger.info("Database indexes configured successfully.")
 
     async def disconnect(self):
@@ -98,4 +120,16 @@ def get_interview_sessions_collection():
 
 def get_triage_alerts_collection():
     return get_database()["triage_alerts"]
+
+
+def get_users_collection():
+    return get_database()["users"]
+
+
+def get_audit_logs_collection():
+    return get_database()["audit_logs"]
+
+
+def get_consent_records_collection():
+    return get_database()["consent_records"]
 

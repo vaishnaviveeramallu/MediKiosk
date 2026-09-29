@@ -518,8 +518,11 @@ class AIService:
         self.provider = settings.AI_PROVIDER
         self.timeout = settings.AI_TIMEOUT_SECONDS
 
-    def get_initial_question(self, language: str = "en") -> AdaptiveQuestionItem:
-        """Returns standard initial Chief Complaint question."""
+    def get_initial_question(self, language: str = "en", history_mode: str = "general") -> AdaptiveQuestionItem:
+        """Returns standard initial Chief Complaint question for General or AYUSH mode."""
+        if history_mode == "ayush":
+            from app.services.ayush_service import ayush_service
+            return ayush_service.get_initial_question(language)
         return INITIAL_CHIEF_COMPLAINT_QUESTION
 
     async def generate_next_question(
@@ -527,11 +530,17 @@ class AIService:
         patient_info: dict,
         answers: List[dict],
         language: str = "en",
+        history_mode: str = "general",
     ) -> AdaptiveQuestionItem:
         """
         Determines the next adaptive clinical question based on conversation history.
+        Routes to ayush_service if history_mode is 'ayush'.
         Tries external LLM provider if configured; falls back safely to ClinicalHeuristicEngine.
         """
+        if history_mode == "ayush":
+            from app.services.ayush_service import ayush_service
+            return ayush_service.get_next_question(patient_info, answers, language)
+
         if not self.api_key or self.provider == "heuristic":
             return ClinicalHeuristicEngine.get_next_question(patient_info, answers, language)
 

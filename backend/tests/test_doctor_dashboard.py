@@ -9,6 +9,7 @@ from app.database import (
     get_documents_collection,
     get_interview_sessions_collection,
     get_triage_alerts_collection,
+    get_users_collection,
 )
 from app.models.doctor import DoctorReviewStatus
 from app.services.doctor_service import doctor_service
@@ -27,15 +28,28 @@ async def _create_test_patient(ac: AsyncClient, name: str = "Dr Test Patient", c
     return res.json()
 
 
+async def _get_doctor_headers(ac: AsyncClient) -> dict:
+    unique = uuid.uuid4().hex[:6]
+    res = await ac.post("/api/auth/register", json={
+        "username": f"doc_{unique}",
+        "password": "DoctorPass123!",
+        "full_name": "Dr. Testing MD",
+        "role": "doctor",
+    })
+    token = res.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 @pytest.mark.anyio
 async def test_doctor_queue_retrieval_and_metrics():
     """Verify that doctor queue lists real patients and aggregates metrics correctly."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         pat = await _create_test_patient(ac, "Dr Queue Test Patient 1", "Persistent fever")
         pid = pat["id"]
 
         # Retrieve queue
-        res = await ac.get("/api/doctor/queue")
+        res = await ac.get("/api/doctor/queue", headers=headers)
         assert res.status_code == 200
         data = res.json()
 
@@ -63,26 +77,27 @@ async def test_doctor_queue_retrieval_and_metrics():
 async def test_doctor_queue_search_and_filters():
     """Verify search by name, token, and filters by triage level and review status."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         unique_name = f"UniqueDoctorSearch-{uuid.uuid4().hex[:6]}"
         pat = await _create_test_patient(ac, unique_name, "Joint swelling")
         pid = pat["id"]
         token = pat["token_number"]
 
         # Search by exact full name
-        res = await ac.get(f"/api/doctor/queue?search={unique_name}")
+        res = await ac.get(f"/api/doctor/queue?search={unique_name}", headers=headers)
         assert res.status_code == 200
         matches = res.json()["patients"]
         assert len(matches) == 1
         assert matches[0]["patient_id"] == pid
 
         # Search by OPD token
-        res = await ac.get(f"/api/doctor/queue?search={token}")
+        res = await ac.get(f"/api/doctor/queue?search={token}", headers=headers)
         assert res.status_code == 200
         token_matches = res.json()["patients"]
         assert any(p["patient_id"] == pid for p in token_matches)
 
         # Filter by review status
-        res = await ac.get("/api/doctor/queue?review_status=pending_review")
+        res = await ac.get("/api/doctor/queue?review_status=pending_review", headers=headers)
         assert res.status_code == 200
         pending_matches = res.json()["patients"]
         assert all(p["doctor_review_status"] == "pending_review" for p in pending_matches)
@@ -92,6 +107,7 @@ async def test_doctor_queue_search_and_filters():
 async def test_patient_clinical_detail_full_aggregation():
     """Verify all 8 clinical sections in the comprehensive patient review dossier."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         pat = await _create_test_patient(ac, "Comprehensive Dossier Patient", "Severe abdominal pain")
         pid = pat["id"]
         token = pat["token_number"]
@@ -170,7 +186,7 @@ async def test_patient_clinical_detail_full_aggregation():
         await clinical_summary_service.generate_summary(pid, force_regenerate=True)
 
         # Retrieve full clinical detail dossier
-        res = await ac.get(f"/api/doctor/patients/{pid}")
+        res = await ac.get(f"/api/doctor/patients/{pid}", headers=headers)
         assert res.status_code == 200
         detail = res.json()
 
@@ -225,6 +241,7 @@ async def test_patient_clinical_detail_full_aggregation():
 async def test_verbatim_interview_no_rewriting():
     """Verify that interview answers are returned 100% verbatim without AI hallucination or paraphrasing."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         pat = await _create_test_patient(ac, "Verbatim Test Patient", "Back spasm")
         pid = pat["id"]
         verbatim_text = "Severe shooting pain in lower spine radiating to left calf since lifting gas cylinder."
@@ -248,7 +265,7 @@ async def test_verbatim_interview_no_rewriting():
             ],
         })
 
-        res = await ac.get(f"/api/doctor/patients/{pid}/interview")
+        res = await ac.get(f"/api/doctor/patients/{pid}/interview", headers=headers)
         assert res.status_code == 200
         data = res.json()
         assert len(data["answers"]) == 1
@@ -259,6 +276,7 @@ async def test_verbatim_interview_no_rewriting():
 async def test_summary_draft_editing_and_version_history():
     """Verify that doctor can edit the summary draft, saving audit trail in version_history."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         pat = await _create_test_patient(ac, "Draft Edit Patient", "Chronic cough")
         pid = pat["id"]
 
@@ -271,7 +289,7 @@ async def test_summary_draft_editing_and_version_history():
             "summary_draft": edit_1_text,
             "physician_notes": "Corrected cough timeline based on bedside verification.",
             "doctor_name": "Dr. Sharma",
-        })
+        }, headers=headers)
         assert res1.status_code == 200
         data1 = res1.json()
         assert data1["summary_draft"] == edit_1_text
@@ -286,7 +304,7 @@ async def test_summary_draft_editing_and_version_history():
             "summary_draft": edit_2_text,
             "physician_notes": "Added differential diagnosis.",
             "doctor_name": "Dr. Verma",
-        })
+        }, headers=headers)
         assert res2.status_code == 200
         data2 = res2.json()
         assert data2["summary_draft"] == edit_2_text
@@ -299,6 +317,7 @@ async def test_summary_draft_editing_and_version_history():
 async def test_physician_confirmation_workflow_and_idempotency():
     """Verify physician confirmation workflow, timestamp recording, and duplicate confirmation safety."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         pat = await _create_test_patient(ac, "Confirmation Patient", "Joint pains")
         pid = pat["id"]
 
@@ -309,7 +328,7 @@ async def test_physician_confirmation_workflow_and_idempotency():
         res = await ac.post(f"/api/doctor/patients/{pid}/summary/confirm", json={
             "confirmed_by": "Dr. Arvind Sharma, MD",
             "doctor_notes": "Bedside examination verified; summary accurately captures clinical history.",
-        })
+        }, headers=headers)
         assert res.status_code == 200
         data = res.json()
         assert data["confirmed_by"] == "Dr. Arvind Sharma, MD"
@@ -317,7 +336,7 @@ async def test_physician_confirmation_workflow_and_idempotency():
         assert data["verification_status"] == "physician_confirmed"
 
         # Check patient document review_status updated in DB
-        pat_res = await ac.get(f"/api/doctor/patients/{pid}")
+        pat_res = await ac.get(f"/api/doctor/patients/{pid}", headers=headers)
         assert pat_res.status_code == 200
         assert pat_res.json()["review_info"]["doctor_review_status"] == DoctorReviewStatus.PHYSICIAN_CONFIRMED.value
 
@@ -325,7 +344,7 @@ async def test_physician_confirmation_workflow_and_idempotency():
         res_repeat = await ac.post(f"/api/doctor/patients/{pid}/summary/confirm", json={
             "confirmed_by": "Dr. Arvind Sharma, MD",
             "doctor_notes": "Re-confirmed after prescription entry.",
-        })
+        }, headers=headers)
         assert res_repeat.status_code == 200
         assert res_repeat.json()["verification_status"] == "physician_confirmed"
 
@@ -334,18 +353,19 @@ async def test_physician_confirmation_workflow_and_idempotency():
 async def test_review_status_update_endpoint():
     """Verify manual review status updates (e.g., in_review, needs_verification)."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         pat = await _create_test_patient(ac, "Status Update Patient", "Fatigue")
         pid = pat["id"]
 
         res = await ac.patch(f"/api/doctor/patients/{pid}/review-status", json={
             "review_status": "needs_verification",
             "notes": "ECG required before completing summary sign-off.",
-        })
+        }, headers=headers)
         assert res.status_code == 200
         assert res.json()["doctor_review_status"] == "needs_verification"
 
         # Verify reflected in doctor queue
-        q_res = await ac.get(f"/api/doctor/queue?review_status=needs_verification")
+        q_res = await ac.get(f"/api/doctor/queue?review_status=needs_verification", headers=headers)
         assert q_res.status_code == 200
         matches = q_res.json()["patients"]
         assert any(p["patient_id"] == pid for p in matches)
@@ -355,32 +375,33 @@ async def test_review_status_update_endpoint():
 async def test_doctor_sub_endpoints():
     """Verify individual sub-endpoints for interview, documents, timeline, summary, conflicts."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         pat = await _create_test_patient(ac, "Sub Endpoints Patient", "Skin allergy")
         pid = pat["id"]
 
         # Interview endpoint
-        r1 = await ac.get(f"/api/doctor/patients/{pid}/interview")
+        r1 = await ac.get(f"/api/doctor/patients/{pid}/interview", headers=headers)
         assert r1.status_code == 200
         assert "answers" in r1.json()
 
         # Documents endpoint
-        r2 = await ac.get(f"/api/doctor/patients/{pid}/documents")
+        r2 = await ac.get(f"/api/doctor/patients/{pid}/documents", headers=headers)
         assert r2.status_code == 200
         assert "documents" in r2.json()
         assert "ocr_extracted" in r2.json()
 
         # Timeline endpoint
-        r3 = await ac.get(f"/api/doctor/patients/{pid}/timeline")
+        r3 = await ac.get(f"/api/doctor/patients/{pid}/timeline", headers=headers)
         assert r3.status_code == 200
         assert "dated_events" in r3.json()
 
         # Summary endpoint
-        r4 = await ac.get(f"/api/doctor/patients/{pid}/summary")
+        r4 = await ac.get(f"/api/doctor/patients/{pid}/summary", headers=headers)
         assert r4.status_code == 200
         assert "summary_draft" in r4.json()
 
         # Conflicts endpoint
-        r5 = await ac.get(f"/api/doctor/patients/{pid}/conflicts")
+        r5 = await ac.get(f"/api/doctor/patients/{pid}/conflicts", headers=headers)
         assert r5.status_code == 200
         assert "conflicts" in r5.json()
 
@@ -389,7 +410,8 @@ async def test_doctor_sub_endpoints():
 async def test_doctor_nonexistent_patient_404():
     """Verify 404 response for non-existent patient ID."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = await _get_doctor_headers(ac)
         fake_id = "pat-nonexistent-12345"
-        res = await ac.get(f"/api/doctor/patients/{fake_id}")
+        res = await ac.get(f"/api/doctor/patients/{fake_id}", headers=headers)
         assert res.status_code == 404
         assert "not found" in res.json()["detail"].lower()

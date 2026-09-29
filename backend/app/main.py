@@ -14,6 +14,9 @@ from app.routes.triage import router as triage_router
 from app.routes.document import router as document_router, documents_direct_router
 from app.routes.summary import router as summary_router
 from app.routes.doctor import router as doctor_router
+from app.routes.auth import router as auth_router
+from app.routes.audit import router as audit_router
+from app.routes.integrations import router as integrations_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +68,9 @@ app.include_router(document_router)
 app.include_router(documents_direct_router)
 app.include_router(summary_router)
 app.include_router(doctor_router)
+app.include_router(auth_router)
+app.include_router(audit_router)
+app.include_router(integrations_router)
 
 
 @app.get("/", tags=["root"])

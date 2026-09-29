@@ -23,6 +23,7 @@ import {
   UserCheck,
   AlertCircle,
 } from "lucide-react";
+import { getAuthHeaders } from "@/lib/auth";
 
 interface DoctorQueuePatient {
   patient_id: string;
@@ -60,6 +61,21 @@ interface DoctorQueueResponse {
   patients: DoctorQueuePatient[];
 }
 
+interface IntegrationComponentStatus {
+  name: string;
+  status: string;
+  configured: boolean;
+  message: string;
+  endpoint_url?: string | null;
+  details?: Record<string, any> | null;
+}
+
+interface SystemIntegrationsStatusResponse {
+  timestamp: string;
+  system_version: string;
+  components: Record<string, IntegrationComponentStatus>;
+}
+
 function DoctorDashboardContent() {
   const router = useRouter();
 
@@ -67,10 +83,28 @@ function DoctorDashboardContent() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Phase 12: Healthcare Interoperability Status
+  const [integrations, setIntegrations] = useState<SystemIntegrationsStatusResponse | null>(null);
+  const [showIntegrations, setShowIntegrations] = useState<boolean>(false);
+
   // Filter States
   const [searchTerm, setSearchTerm] = useState<string>("");
   const [selectedTriage, setSelectedTriage] = useState<string>("all");
   const [selectedStatus, setSelectedStatus] = useState<string>("all");
+
+  const fetchIntegrations = async () => {
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/integrations/status", {
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIntegrations(data);
+      }
+    } catch (e) {
+      console.error("Failed to load integrations status", e);
+    }
+  };
 
   const fetchQueue = useCallback(async () => {
     setLoading(true);
@@ -83,6 +117,7 @@ function DoctorDashboardContent() {
 
       const res = await fetch(`http://127.0.0.1:8000/api/doctor/queue?${params.toString()}`, {
         cache: "no-store",
+        headers: getAuthHeaders(),
       });
       if (!res.ok) {
         throw new Error(`Failed to load queue (${res.status})`);
@@ -98,6 +133,7 @@ function DoctorDashboardContent() {
 
   useEffect(() => {
     fetchQueue();
+    fetchIntegrations();
   }, [fetchQueue]);
 
   const getReviewStatusBadge = (status: string) => {
@@ -189,6 +225,54 @@ function DoctorDashboardContent() {
             <span>Refresh Queue</span>
           </button>
         </div>
+      </div>
+
+      {/* Phase 12: Healthcare Interoperability & Integration Status */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm text-white space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+              Healthcare Interoperability & Security Architecture
+            </span>
+            <span className="text-[11px] text-slate-400 hidden sm:inline">
+              (Truthful Status &bull; Zero Mock Data)
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowIntegrations(!showIntegrations)}
+            className="text-xs font-semibold text-teal-400 hover:text-teal-300 underline"
+          >
+            {showIntegrations ? "Hide Subsystems" : "View Subsystems Status"}
+          </button>
+        </div>
+
+        {showIntegrations && integrations && (
+          <div className="pt-3 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 text-xs">
+            {Object.entries(integrations.components).map(([key, comp]) => (
+              <div key={key} className="bg-slate-800/90 rounded-xl p-3 border border-slate-700/60 flex flex-col justify-between space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-200 capitalize">{key.replace("_", " ")}</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                      comp.status === "AVAILABLE" || comp.status === "CONFIGURED"
+                        ? "bg-emerald-900/60 text-emerald-300 border border-emerald-700"
+                        : comp.status === "LOCAL_ONLY"
+                        ? "bg-blue-900/60 text-blue-300 border border-blue-700"
+                        : "bg-amber-900/60 text-amber-300 border border-amber-700"
+                    }`}
+                  >
+                    {comp.status}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-tight">
+                  {comp.message}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* 2. CLINICAL METRICS CHIPS */}

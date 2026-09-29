@@ -392,6 +392,25 @@ class DoctorService:
             "original_ai_draft": (patient_doc.get("clinical_summary") or {}).get("original_ai_draft"),
         }
 
+        # 9. AYUSH History & Dashavidha Pariksha Structuring
+        from app.services.ayush_service import ayush_service
+        ayush_answers = []
+        if sess:
+            for ans in sess.get("answers", []):
+                if ans.get("mode") == "ayush" or ans.get("question_id", "").startswith("ayush_"):
+                    ayush_answers.append(ans)
+
+        has_ayush = len(ayush_answers) > 0 or (sess and sess.get("history_mode") == "ayush")
+        ayush_history_data = None
+        if has_ayush:
+            parsed_ayush = ayush_service.parse_ayush_clinical_data(sess.get("answers", []) if sess else [])
+            ayush_history_data = {
+                "has_ayush_history": True,
+                "total_ayush_answers": len(ayush_answers),
+                "structured_data": parsed_ayush.model_dump(),
+                "answers": ayush_answers,
+            }
+
         return PatientClinicalDetailResponse(
             patient=patient_data,
             interview=interview_data,
@@ -402,6 +421,7 @@ class DoctorService:
             summary=summary_data,
             conflicts=conflicts,
             review_info=review_info,
+            ayush_history=ayush_history_data,
         )
 
     async def save_summary_draft(

@@ -30,6 +30,7 @@ import {
   ClipboardList,
 } from "lucide-react";
 import { WavAudioRecorder } from "@/lib/audioRecorder";
+import { getAuthHeaders } from "@/lib/auth";
 
 interface AdaptiveQuestionItem {
   question_id: string;
@@ -60,6 +61,7 @@ interface AnswerRecord {
   question_order?: number;
   input_method?: string;
   language?: string;
+  mode?: string;
 }
 
 interface TriageAlertInfo {
@@ -92,6 +94,7 @@ interface InterviewSession {
   full_name: string;
   selected_language: "en" | "hi";
   status: "in_progress" | "completed" | "triage_alert";
+  history_mode?: "general" | "ayush";
   started_at: string;
   completed_at?: string;
   answers: AnswerRecord[];
@@ -115,6 +118,7 @@ function InterviewComponent() {
 
   // State
   const [patientIdInput, setPatientIdInput] = useState(patientIdParam);
+  const [historyMode, setHistoryMode] = useState<"general" | "ayush">("general");
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingAnswer, setSavingAnswer] = useState(false);
@@ -452,7 +456,7 @@ function InterviewComponent() {
     if (session?.session_id) {
       fetch(`http://127.0.0.1:8000/api/interview/${session.session_id}/language`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ language: newLang }),
       }).catch((e) => console.warn("Failed to persist language switch:", e));
     }
@@ -694,15 +698,18 @@ function InterviewComponent() {
   };
 
   // Initialize or resume interview session
-  const initSession = async (pid: string) => {
+  const initSession = async (pid: string, modeOverride?: "general" | "ayush") => {
     if (!pid.trim()) return;
     setLoading(true);
     setErrorMessage(null);
     setConsentBlockedMessage(null);
 
+    const activeMode = modeOverride || historyMode;
+
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/interview/start?patient_id=${encodeURIComponent(pid.trim())}`, {
+      const res = await fetch(`http://127.0.0.1:8000/api/interview/start?patient_id=${encodeURIComponent(pid.trim())}&mode=${activeMode}`, {
         method: "POST",
+        headers: getAuthHeaders(),
       });
 
       if (!res.ok) {
@@ -717,6 +724,9 @@ function InterviewComponent() {
 
       const data: InterviewSession = await res.json();
       setSession(data);
+      if (data.history_mode === "ayush" || data.history_mode === "general") {
+        setHistoryMode(data.history_mode);
+      }
       setCurrentAnswer("");
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to load clinical interview session.");
@@ -726,12 +736,17 @@ function InterviewComponent() {
   };
 
   useEffect(() => {
+    const urlMode = searchParams.get("mode") as "general" | "ayush" | null;
+    const initialMode = urlMode === "ayush" ? "ayush" : "general";
+    if (urlMode) {
+      setHistoryMode(initialMode);
+    }
     if (patientIdParam) {
-      initSession(patientIdParam);
+      initSession(patientIdParam, initialMode);
     } else {
       setLoading(false);
     }
-  }, [patientIdParam]);
+  }, [patientIdParam, searchParams]);
 
   // Submit Answer to MongoDB & fetch next adaptive question
   const handleAnswerSubmit = async (answerText: string, isSkipped = false) => {
@@ -768,11 +783,12 @@ function InterviewComponent() {
 
     const isHindi = selectedLanguage === "hi";
     const questionText = isHindi ? currentQ.text_hi : currentQ.text_en;
+    const isAyush = (session?.history_mode === "ayush") || (historyMode === "ayush") || currentQ.question_id.startsWith("ayush_");
 
     try {
       const res = await fetch(`http://127.0.0.1:8000/api/interview/${session.session_id}/answer`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           question_id: currentQ.question_id,
           question_text: questionText,
@@ -782,6 +798,7 @@ function InterviewComponent() {
           skipped: isSkipped,
           input_method: usedVoice ? "voice" : "text",
           language: selectedLanguage,
+          mode: isAyush ? "ayush" : "general",
         }),
       });
 
@@ -810,6 +827,7 @@ function InterviewComponent() {
     try {
       const res = await fetch(`http://127.0.0.1:8000/api/interview/${sessionId}/complete`, {
         method: "POST",
+        headers: getAuthHeaders(),
       });
       if (res.ok) {
         const completedSession: InterviewSession = await res.json();
@@ -904,8 +922,52 @@ function InterviewComponent() {
               />
             </div>
 
+            {/* History Mode Selector */}
+            <div className="space-y-2">
+              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                Select Intake History Mode
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setHistoryMode("general")}
+                  className={`p-3.5 rounded-xl border-2 text-left transition ${
+                    historyMode === "general"
+                      ? "border-teal-600 bg-teal-50/70 text-teal-950 shadow-xs ring-1 ring-teal-600/30"
+                      : "border-slate-200 bg-white hover:border-slate-300 text-slate-700"
+                  }`}
+                >
+                  <div className="flex items-center space-x-2 font-bold text-sm">
+                    <Stethoscope className="w-4 h-4 text-teal-600" />
+                    <span>General Clinical</span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1 leading-snug">
+                    Standard allopathic clinical inquiry: symptoms, onset, severity, systems.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setHistoryMode("ayush")}
+                  className={`p-3.5 rounded-xl border-2 text-left transition ${
+                    historyMode === "ayush"
+                      ? "border-emerald-600 bg-emerald-50/70 text-emerald-950 shadow-xs ring-1 ring-emerald-600/30"
+                      : "border-slate-200 bg-white hover:border-slate-300 text-slate-700"
+                  }`}
+                >
+                  <div className="flex items-center space-x-2 font-bold text-sm">
+                    <span className="text-base">🌿</span>
+                    <span>AYUSH History</span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1 leading-snug">
+                    Classical holistic intake: Agni, Koshta, Ahara, Vihara, Bala & Dashavidha.
+                  </p>
+                </button>
+              </div>
+            </div>
+
             <button
-              onClick={() => initSession(patientIdInput)}
+              onClick={() => initSession(patientIdInput, historyMode)}
               disabled={!patientIdInput.trim() || loading}
               className="w-full py-4 px-6 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl font-bold text-base shadow-md flex items-center justify-center space-x-2 transition"
             >
@@ -1241,6 +1303,28 @@ function InterviewComponent() {
         </div>
       </div>
 
+      {/* AYUSH Mode Active Banner */}
+      {session.history_mode === "ayush" && (
+        <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border-2 border-emerald-300 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center space-x-2.5">
+            <span className="text-xl">🌿</span>
+            <div>
+              <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-950 block">
+                {isHindi ? "आयुष नैदानिक इतिहास मोड" : "AYUSH Clinical History Mode"}
+              </span>
+              <span className="text-xs text-emerald-800">
+                {isHindi
+                  ? "पारंपरिक आयुर्वेदिक/होलिस्टिक स्वास्थ्य डेटा (अग्नि, कोष्ठ, आहार, विहार, बल एवं दशविध परीक्षा)"
+                  : "Holistic intake assessing Agni, Koshta, Ahara, Vihara, Bala & Dashavidha"}
+              </span>
+            </div>
+          </div>
+          <span className="self-start sm:self-auto text-[10px] uppercase font-bold tracking-widest bg-emerald-200 text-emerald-900 px-2.5 py-1 rounded-full whitespace-nowrap">
+            Non-Diagnostic
+          </span>
+        </div>
+      )}
+
       {/* Adaptive Progress Bar Container */}
       <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-2">
         <div className="flex justify-between items-center text-xs sm:text-sm font-bold text-slate-700">
@@ -1371,6 +1455,33 @@ function InterviewComponent() {
                 </button>
               ))}
             </div>
+            {/* Quick Non-Diagnostic Right-to-Decline Chips for AYUSH */}
+            {session.history_mode === "ayush" && (
+              <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100 mt-2">
+                <button
+                  type="button"
+                  onClick={() => setCurrentAnswer(isHindi ? "मुझे नहीं पता / अनिश्चित" : "I don't know / Not sure")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                    currentAnswer === (isHindi ? "मुझे नहीं पता / अनिश्चित" : "I don't know / Not sure")
+                      ? "bg-slate-700 text-white border-slate-700 shadow-xs"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300"
+                  }`}
+                >
+                  ❓ {isHindi ? "मुझे नहीं पता / अनिश्चित" : "I don't know / Not sure"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentAnswer(isHindi ? "उत्तर नहीं देना चाहते" : "Prefer not to answer")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                    currentAnswer === (isHindi ? "उत्तर नहीं देना चाहते" : "Prefer not to answer")
+                      ? "bg-slate-700 text-white border-slate-700 shadow-xs"
+                      : "bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300"
+                  }`}
+                >
+                  🛡️ {isHindi ? "उत्तर नहीं देना चाहते" : "Prefer not to answer"}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

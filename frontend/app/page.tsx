@@ -34,18 +34,18 @@ export default function Home() {
           </p>
         </div>
 
-        {/* Action Buttons (Large, Touch-Optimized) */}
-        <div className="pt-6 grid grid-cols-1 sm:grid-cols-2 gap-5 max-w-2xl mx-auto">
+        {/* Action Buttons (Large, Touch-Optimized Kiosk Grid) */}
+        <div className="pt-6 grid grid-cols-1 sm:grid-cols-2 gap-5 max-w-3xl mx-auto">
           <Link
             href="/register"
-            className="flex items-center justify-between p-6 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-2xl shadow-lg hover:shadow-xl transition transform hover:-translate-y-0.5 group"
+            className="flex items-center justify-between p-6 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-2xl shadow-md hover:shadow-xl transition transform hover:-translate-y-0.5 group focus:outline-none focus:ring-4 focus:ring-teal-300"
           >
             <div className="flex items-center space-x-4">
-              <div className="w-14 h-14 rounded-xl bg-teal-500/50 flex items-center justify-center text-white">
+              <div className="w-14 h-14 rounded-xl bg-teal-500/50 flex items-center justify-center text-white flex-shrink-0">
                 <UserPlus className="w-8 h-8" />
               </div>
               <div className="text-left">
-                <div className="text-xl font-bold">New Registration</div>
+                <div className="text-xl font-bold">1. New Registration</div>
                 <div className="text-sm text-teal-100 font-medium">नया पंजीकरण शुरू करें</div>
               </div>
             </div>
@@ -53,15 +53,47 @@ export default function Home() {
           </Link>
 
           <Link
-            href="/queue"
-            className="flex items-center justify-between p-6 bg-slate-900 hover:bg-slate-800 active:bg-slate-950 text-white rounded-2xl shadow-lg hover:shadow-xl transition transform hover:-translate-y-0.5 group"
+            href="/interview"
+            className="flex items-center justify-between p-6 bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 text-white rounded-2xl shadow-md hover:shadow-xl transition transform hover:-translate-y-0.5 group focus:outline-none focus:ring-4 focus:ring-emerald-300"
           >
             <div className="flex items-center space-x-4">
-              <div className="w-14 h-14 rounded-xl bg-slate-800 flex items-center justify-center text-white">
+              <div className="w-14 h-14 rounded-xl bg-emerald-600/50 flex items-center justify-center text-white flex-shrink-0">
+                <HeartPulse className="w-8 h-8" />
+              </div>
+              <div className="text-left">
+                <div className="text-xl font-bold">2. Clinical Interview</div>
+                <div className="text-sm text-emerald-100 font-medium">केस-टेकिंग (सवाल-जवाब)</div>
+              </div>
+            </div>
+            <ArrowRight className="w-6 h-6 text-emerald-200 group-hover:translate-x-1 transition" />
+          </Link>
+
+          <Link
+            href="/documents"
+            className="flex items-center justify-between p-6 bg-cyan-700 hover:bg-cyan-800 active:bg-cyan-900 text-white rounded-2xl shadow-md hover:shadow-xl transition transform hover:-translate-y-0.5 group focus:outline-none focus:ring-4 focus:ring-cyan-300"
+          >
+            <div className="flex items-center space-x-4">
+              <div className="w-14 h-14 rounded-xl bg-cyan-600/50 flex items-center justify-center text-white flex-shrink-0">
+                <Sparkles className="w-8 h-8" />
+              </div>
+              <div className="text-left">
+                <div className="text-xl font-bold">3. Upload Reports</div>
+                <div className="text-sm text-cyan-100 font-medium">दस्तावेज़ एवं पर्चे अपलोड</div>
+              </div>
+            </div>
+            <ArrowRight className="w-6 h-6 text-cyan-200 group-hover:translate-x-1 transition" />
+          </Link>
+
+          <Link
+            href="/queue"
+            className="flex items-center justify-between p-6 bg-slate-900 hover:bg-slate-800 active:bg-slate-950 text-white rounded-2xl shadow-md hover:shadow-xl transition transform hover:-translate-y-0.5 group focus:outline-none focus:ring-4 focus:ring-slate-400"
+          >
+            <div className="flex items-center space-x-4">
+              <div className="w-14 h-14 rounded-xl bg-slate-800 flex items-center justify-center text-white flex-shrink-0">
                 <Users className="w-8 h-8" />
               </div>
               <div className="text-left">
-                <div className="text-xl font-bold">OPD Live Queue</div>
+                <div className="text-xl font-bold">4. OPD Live Queue</div>
                 <div className="text-sm text-slate-300 font-medium">कतार एवं टोकन स्थिति</div>
               </div>
             </div>

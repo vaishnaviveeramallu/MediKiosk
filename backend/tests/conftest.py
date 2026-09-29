@@ -35,6 +35,8 @@ async def cleanup_test_database():
         await db_manager.db.interview_sessions.drop()
         await db_manager.db.triage_alerts.drop()
         await db_manager.db.medical_documents.drop()
+        await db_manager.db.audit_logs.drop()
+        await db_manager.db.consent_records.drop()
     await db_manager.disconnect()
     yield
     settings.DATABASE_NAME = "medikiosk_test"
@@ -45,4 +47,6 @@ async def cleanup_test_database():
         await db_manager.db.interview_sessions.drop()
         await db_manager.db.triage_alerts.drop()
         await db_manager.db.medical_documents.drop()
+        await db_manager.db.audit_logs.drop()
+        await db_manager.db.consent_records.drop()
     await db_manager.disconnect()

@@ -1,6 +1,6 @@
 from typing import List, Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Depends
 from bson import ObjectId
 from bson.errors import InvalidId
 from pydantic import BaseModel
@@ -15,6 +15,10 @@ from app.models.interview import (
     INITIAL_CHIEF_COMPLAINT_QUESTION,
 )
 from app.services.ai_service import ai_service
+from app.services.consent_service import consent_service
+from app.services.audit_service import audit_service
+from app.models.audit import AuditEventType
+from app.utils.auth_deps import get_current_user_optional, verify_patient_ownership
 
 router = APIRouter(prefix="/api/interview", tags=["clinical-interview"])
 
@@ -62,6 +66,7 @@ def serialize_session(doc: dict) -> InterviewSessionResponse:
         full_name=doc["full_name"],
         selected_language=doc.get("selected_language", "en"),
         status=doc["status"],
+        history_mode=doc.get("history_mode", "general"),
         started_at=doc["started_at"],
         completed_at=doc.get("completed_at"),
         answers=answers,
@@ -85,7 +90,11 @@ def serialize_session(doc: dict) -> InterviewSessionResponse:
     summary="Start or resume a clinical interview session",
     description="Validates patient consent, initializes or resumes an adaptive interview session in MongoDB.",
 )
-async def start_interview(patient_id: str = Query(..., description="MongoDB ID or OPD token")):
+async def start_interview(
+    patient_id: str = Query(..., description="MongoDB ID or OPD token"),
+    mode: str = Query("general", description="History mode: 'general' or 'ayush'"),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     db = get_database()
     patients_col = db["patients"]
     sessions_col = db["interview_sessions"]
@@ -104,20 +113,22 @@ async def start_interview(patient_id: str = Query(..., description="MongoDB ID o
             detail=f"Patient with identifier '{patient_id}' not found",
         )
 
-    # 2. Strict Consent Guard
-    consent_given = patient.get("consent_given")
-    consent_status = patient.get("consent_status")
+    # 2. Strict IDOR check if user is authenticated
+    if current_user:
+        verify_patient_ownership(str(patient["_id"]), current_user)
 
-    if not consent_given or consent_status != "granted":
+    # 3. Strict Consent Guard via Consent Service
+    consent_check = await consent_service.check_consent(str(patient["_id"]))
+    if not consent_check.can_proceed_clinical:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                f"Cannot start clinical interview. Patient consent status is '{consent_status or 'pending'}'. "
+                f"Cannot start clinical interview. Patient consent status is '{consent_check.current_status}'. "
                 "Explicit consent must be granted before clinical intake can begin."
             ),
         )
 
-    # 3. Check for existing in-progress session (Resume Safety)
+    # 4. Check for existing in-progress session (Resume Safety)
     existing_session = await sessions_col.find_one({
         "patient_id": str(patient["_id"]),
         "status": "in_progress",
@@ -127,6 +138,7 @@ async def start_interview(patient_id: str = Query(..., description="MongoDB ID o
         # If existing session didn't have current_question saved, regenerate appropriately
         if not existing_session.get("current_question"):
             lang = existing_session.get("selected_language", "en")
+            history_mode = existing_session.get("history_mode", "general")
             answers = existing_session.get("answers", [])
             patient_info = {
                 "age": patient.get("age"),
@@ -134,9 +146,9 @@ async def start_interview(patient_id: str = Query(..., description="MongoDB ID o
                 "token_number": patient.get("token_number"),
             }
             if not answers:
-                initial_q = ai_service.get_initial_question(lang)
+                initial_q = ai_service.get_initial_question(lang, history_mode=history_mode)
             else:
-                initial_q = await ai_service.generate_next_question(patient_info, answers, lang)
+                initial_q = await ai_service.generate_next_question(patient_info, answers, lang, history_mode=history_mode)
             
             await sessions_col.update_one(
                 {"_id": existing_session["_id"]},
@@ -145,11 +157,12 @@ async def start_interview(patient_id: str = Query(..., description="MongoDB ID o
             existing_session["current_question"] = initial_q.model_dump()
         return serialize_session(existing_session)
 
-    # 4. Create new adaptive interview session
+    # 5. Create new adaptive interview session
     now = datetime.now(timezone.utc)
     session_id = f"int_{uuid.uuid4().hex[:12]}"
     lang = patient.get("selected_language", "en")
-    initial_question = ai_service.get_initial_question(lang)
+    req_mode = "ayush" if mode.lower() == "ayush" else "general"
+    initial_question = ai_service.get_initial_question(lang, history_mode=req_mode)
 
     session_doc = {
         "session_id": session_id,
@@ -157,6 +170,7 @@ async def start_interview(patient_id: str = Query(..., description="MongoDB ID o
         "token_number": patient["token_number"],
         "full_name": patient["full_name"],
         "selected_language": lang,
+        "history_mode": req_mode,
         "status": "in_progress",
         "started_at": now,
         "completed_at": None,
@@ -178,6 +192,17 @@ async def start_interview(patient_id: str = Query(..., description="MongoDB ID o
         },
     )
 
+    await audit_service.log_event(
+        action=AuditEventType.INTERVIEW_START.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
+        patient_id=str(patient["_id"]),
+        session_id=session_id,
+        resource_type="interview_session",
+        resource_id=session_id,
+        details={"mode": req_mode, "language": lang},
+    )
+
     return serialize_session(session_doc)
 
 
@@ -187,7 +212,11 @@ async def start_interview(patient_id: str = Query(..., description="MongoDB ID o
     summary="Submit patient answer and dynamically generate next question",
     description="Persists answer in MongoDB, updates clinical history, and generates next adaptive question.",
 )
-async def submit_answer(session_id: str, payload: AnswerSubmission):
+async def submit_answer(
+    session_id: str,
+    payload: AnswerSubmission,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     db = get_database()
     sessions_col = db["interview_sessions"]
     patients_col = db["patients"]
@@ -199,6 +228,10 @@ async def submit_answer(session_id: str, payload: AnswerSubmission):
             detail=f"Interview session '{session_id}' not found",
         )
 
+    # IDOR ownership validation
+    if current_user:
+        verify_patient_ownership(str(session["patient_id"]), current_user)
+
     if session["status"] == "completed":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -209,6 +242,8 @@ async def submit_answer(session_id: str, payload: AnswerSubmission):
     existing_answers = session.get("answers", [])
     question_order = len(existing_answers) + 1
 
+    history_mode = session.get("history_mode", "general")
+    ans_mode = payload.mode or history_mode
     answer_lang = payload.language or session.get("selected_language", "en")
     answer_input_method = (payload.input_method or "text").lower()
 
@@ -223,6 +258,7 @@ async def submit_answer(session_id: str, payload: AnswerSubmission):
         "question_order": question_order,
         "input_method": answer_input_method,
         "language": answer_lang,
+        "mode": ans_mode,
     }
 
     # Upsert answer into the answers list for this session
@@ -247,6 +283,7 @@ async def submit_answer(session_id: str, payload: AnswerSubmission):
                 "question_order": question_order,
                 "input_method": answer_input_method,
                 "language": answer_lang,
+                "mode": ans_mode,
             }
             await patients_col.update_one(
                 {"_id": patient_oid},
@@ -264,7 +301,7 @@ async def submit_answer(session_id: str, payload: AnswerSubmission):
     lang = session.get("selected_language", "en")
 
     # Generate next adaptive question using AI Service / Heuristic Engine
-    next_question = await ai_service.generate_next_question(patient_info, updated_answers, lang)
+    next_question = await ai_service.generate_next_question(patient_info, updated_answers, lang, history_mode=history_mode)
 
     # Run clinical red-flag & triage detection
     from app.services.triage_detector import triage_detector
@@ -352,6 +389,17 @@ async def submit_answer(session_id: str, payload: AnswerSubmission):
             {"$set": {"registration_status": "interview_completed"}},
         )
 
+    await audit_service.log_event(
+        action=AuditEventType.INTERVIEW_ANSWER.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
+        patient_id=str(session["patient_id"]),
+        session_id=session_id,
+        resource_type="interview_session",
+        resource_id=session_id,
+        details={"question_id": payload.question_id, "stage": payload.stage_number},
+    )
+
     updated_doc = await sessions_col.find_one({"session_id": session_id})
     return serialize_session(updated_doc)
 
@@ -362,7 +410,10 @@ async def submit_answer(session_id: str, payload: AnswerSubmission):
     summary="Retrieve active adaptive interview session (Resume safety)",
     description="Fetches full session state, current question, and all persisted answers from MongoDB.",
 )
-async def get_interview_session(session_id: str):
+async def get_interview_session(
+    session_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     db = get_database()
     sessions_col = db["interview_sessions"]
 
@@ -372,6 +423,9 @@ async def get_interview_session(session_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Interview session '{session_id}' not found",
         )
+
+    if current_user:
+        verify_patient_ownership(str(session["patient_id"]), current_user)
 
     return serialize_session(session)
 
@@ -386,7 +440,11 @@ class UpdateSessionLanguageRequest(BaseModel):
     summary="Update interview session language",
     description="Updates the active language for the session in MongoDB.",
 )
-async def update_session_language(session_id: str, payload: UpdateSessionLanguageRequest):
+async def update_session_language(
+    session_id: str,
+    payload: UpdateSessionLanguageRequest,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     lang_code = payload.language.lower().strip()
     if lang_code not in ["en", "hi"]:
         raise HTTPException(
@@ -397,7 +455,17 @@ async def update_session_language(session_id: str, payload: UpdateSessionLanguag
     db = get_database()
     sessions_col = db["interview_sessions"]
 
-    res = await sessions_col.update_one(
+    session = await sessions_col.find_one({"session_id": session_id})
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Interview session '{session_id}' not found",
+        )
+
+    if current_user:
+        verify_patient_ownership(str(session["patient_id"]), current_user)
+
+    await sessions_col.update_one(
         {"session_id": session_id},
         {
             "$set": {
@@ -406,11 +474,6 @@ async def update_session_language(session_id: str, payload: UpdateSessionLanguag
             }
         },
     )
-    if res.matched_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Interview session '{session_id}' not found",
-        )
 
     updated_doc = await sessions_col.find_one({"session_id": session_id})
     return serialize_session(updated_doc)
@@ -422,7 +485,10 @@ async def update_session_language(session_id: str, payload: UpdateSessionLanguag
     summary="Mark clinical interview as completed",
     description="Finalizes the interview session, records completion timestamp, and updates patient status.",
 )
-async def complete_interview(session_id: str):
+async def complete_interview(
+    session_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     db = get_database()
     sessions_col = db["interview_sessions"]
     patients_col = db["patients"]
@@ -433,6 +499,9 @@ async def complete_interview(session_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Interview session '{session_id}' not found",
         )
+
+    if current_user:
+        verify_patient_ownership(str(session["patient_id"]), current_user)
 
     now = datetime.now(timezone.utc)
     await sessions_col.update_one(
@@ -455,6 +524,17 @@ async def complete_interview(session_id: str):
         )
     except Exception:
         pass
+
+    await audit_service.log_event(
+        action=AuditEventType.INTERVIEW_COMPLETE.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
+        patient_id=str(session["patient_id"]),
+        session_id=session_id,
+        resource_type="interview_session",
+        resource_id=session_id,
+        details={"status": "completed"},
+    )
 
     updated_doc = await sessions_col.find_one({"session_id": session_id})
     return serialize_session(updated_doc)

@@ -42,3 +42,7 @@ data/
 
 # Local development / temporary files
 scratch/
+
+# TypeScript generated files
+tsconfig.tsbuildinfo
+frontend/tsconfig.tsbuildinfo

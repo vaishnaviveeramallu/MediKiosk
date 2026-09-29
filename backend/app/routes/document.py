@@ -1,12 +1,15 @@
 import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status, Body
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, status, Body, Depends
 from fastapi.responses import FileResponse
 from bson import ObjectId
 from bson.errors import InvalidId
 
 from app.database import get_database, get_patients_collection, get_documents_collection
+from app.utils.auth_deps import get_current_user_optional, get_current_user, require_role, verify_patient_ownership
+from app.models.audit import AuditEventType
+from app.services.audit_service import audit_service
 from app.models.document import (
     DocumentType,
     DocumentProcessingStatus,
@@ -85,11 +88,16 @@ async def upload_patient_document(
     file: UploadFile = File(..., description="Uploaded medical document (PDF, JPG, JPEG, PNG)"),
     document_type: str = Form("other", description="Category: prescription, lab_report, discharge_summary, medical_report, imaging_scan, other"),
     notes: Optional[str] = Form(None, description="Optional patient or nurse note"),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
     # 1. Validate patient existence
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
     token_number = patient_doc.get("token_number", "")
+
+    # IDOR check
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     # 2. Read file content safely
     if not file.filename:
@@ -189,6 +197,21 @@ async def upload_patient_document(
             detail="Database error: could not persist document metadata.",
         )
 
+    # Log audit event
+    await audit_service.log_event(
+        action=AuditEventType.DOCUMENT_UPLOAD.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
+        patient_id=canonical_pid,
+        resource_type="document",
+        resource_id=document_id,
+        details={
+            "filename": sanitized_filename,
+            "document_type": document_type,
+            "file_size": len(content),
+        },
+    )
+
     logger.info(f"Successfully uploaded document {document_id} for patient {canonical_pid}")
     return _serialize_document(doc_metadata)
 
@@ -199,9 +222,16 @@ async def upload_patient_document(
     summary="List all uploaded documents for a patient",
     description="Returns all medical documents linked to the verified patient in MongoDB, sorted by upload timestamp.",
 )
-async def list_patient_documents(patient_id: str):
+async def list_patient_documents(
+    patient_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
+
+    # IDOR check
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     docs_col = get_documents_collection()
     cursor = docs_col.find({"patient_id": canonical_pid}).sort("uploaded_at", -1)
@@ -222,9 +252,17 @@ async def list_patient_documents(patient_id: str):
     summary="Get single document metadata",
     description="Retrieves document metadata, strictly validating that the document belongs to the requested patient.",
 )
-async def get_patient_document_metadata(patient_id: str, document_id: str):
+async def get_patient_document_metadata(
+    patient_id: str,
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
+
+    # IDOR check
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
@@ -249,9 +287,17 @@ async def get_patient_document_metadata(patient_id: str, document_id: str):
     summary="Securely view or download the uploaded document file",
     description="Streams the authentic uploaded file, validating patient authorization and preventing path traversal.",
 )
-async def download_patient_document_file(patient_id: str, document_id: str):
+async def download_patient_document_file(
+    patient_id: str,
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
+
+    # IDOR check
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
@@ -288,6 +334,16 @@ async def download_patient_document_file(patient_id: str, document_id: str):
             detail="Security violation: invalid file path.",
         )
 
+    await audit_service.log_event(
+        action=AuditEventType.DOCUMENT_VIEW.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
+        patient_id=canonical_pid,
+        resource_type="document",
+        resource_id=document_id,
+        details={"filename": doc.get("original_filename")},
+    )
+
     return FileResponse(
         path=file_path,
         media_type=doc.get("content_type", "application/octet-stream"),
@@ -300,9 +356,17 @@ async def download_patient_document_file(patient_id: str, document_id: str):
     summary="Delete an uploaded document",
     description="Removes the file from local storage and deletes metadata from MongoDB.",
 )
-async def delete_patient_document(patient_id: str, document_id: str):
+async def delete_patient_document(
+    patient_id: str,
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
+
+    # IDOR check
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
@@ -326,6 +390,16 @@ async def delete_patient_document(patient_id: str, document_id: str):
     # Delete record from MongoDB
     await docs_col.delete_one({"_id": doc["_id"]})
     logger.info(f"Deleted document {document_id} for patient {canonical_pid}")
+
+    await audit_service.log_event(
+        action=AuditEventType.DOCUMENT_DELETE.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
+        patient_id=canonical_pid,
+        resource_type="document",
+        resource_id=document_id,
+        details={"filename": doc.get("original_filename")},
+    )
 
     return {
         "status": "deleted",
@@ -423,6 +497,14 @@ async def _process_document_internal(patient_doc: dict, doc: dict) -> DocumentPr
     await docs_col.update_one({"_id": doc["_id"]}, {"$set": update_data})
     logger.info(f"Document {document_id} processed successfully. Status: {target_status}")
 
+    await audit_service.log_event(
+        action=AuditEventType.DOCUMENT_PROCESS.value,
+        patient_id=canonical_pid,
+        resource_type="document",
+        resource_id=document_id,
+        details={"status": target_status, "confidence": ocr_result.confidence},
+    )
+
     return DocumentProcessResponse(
         document_id=document_id,
         patient_id=canonical_pid,
@@ -441,9 +523,16 @@ async def _process_document_internal(patient_doc: dict, doc: dict) -> DocumentPr
     summary="Process an uploaded medical document with OCR and entity extraction",
     description="Retrieves the authentic stored document, executes OCR (PDF/images, multilingual), extracts structured clinical entities (medications, labs, diagnoses, procedures, allergies), and persists results in MongoDB.",
 )
-async def process_patient_document(patient_id: str, document_id: str):
+async def process_patient_document(
+    patient_id: str,
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
+
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
@@ -462,9 +551,16 @@ async def process_patient_document(patient_id: str, document_id: str):
     summary="Get raw OCR text and OCR metadata for a document",
     description="Returns the unparsed OCR output text along with recognition metadata (engine, languages, confidence).",
 )
-async def get_patient_document_ocr(patient_id: str, document_id: str):
+async def get_patient_document_ocr(
+    patient_id: str,
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
+
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
@@ -489,9 +585,16 @@ async def get_patient_document_ocr(patient_id: str, document_id: str):
     summary="Get structured extracted medical entities for a document",
     description="Returns structured diagnoses, medications, laboratory investigations, procedures, allergies, and patient info.",
 )
-async def get_patient_document_extracted_data(patient_id: str, document_id: str):
+async def get_patient_document_extracted_data(
+    patient_id: str,
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
+
+    if current_user:
+        verify_patient_ownership(canonical_pid, current_user)
 
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
@@ -521,7 +624,14 @@ async def update_document_verification(
     patient_id: str,
     document_id: str,
     payload: VerificationUpdateRequest = Body(...),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
+    if current_user and current_user.get("role") not in ("doctor", "triage_staff"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access forbidden: Role '{current_user.get('role')}' is not authorized to verify documents.",
+        )
+
     patient_doc = await _resolve_patient(patient_id)
     canonical_pid = str(patient_doc["_id"])
 
@@ -541,36 +651,64 @@ async def update_document_verification(
         )
 
     now = datetime.now(timezone.utc)
+    verified_by_user = payload.verified_by or current_user.get("user_id") or doc.get("verified_by")
     update_fields: Dict[str, Any] = {
         "verification_status": v_status,
-        "verified_by": payload.verified_by or doc.get("verified_by"),
+        "verified_by": verified_by_user,
         "verified_at": now if v_status == "verified" else doc.get("verified_at"),
         "verification_notes": payload.verification_notes or doc.get("verification_notes"),
     }
 
     await docs_col.update_one({"_id": doc["_id"]}, {"$set": update_fields})
     updated_doc = await docs_col.find_one({"_id": doc["_id"]})
+
+    await audit_service.log_event(
+        action=AuditEventType.DOCUMENT_VERIFY.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "doctor",
+        patient_id=canonical_pid,
+        resource_type="document",
+        resource_id=document_id,
+        details={
+            "verification_status": v_status,
+            "verified_by": verified_by_user,
+        },
+    )
+
     return _serialize_document(updated_doc)
 
 
 # Direct /api/documents routes for convenience
 @documents_direct_router.post("/{document_id}/process", response_model=DocumentProcessResponse)
-async def direct_process_document(document_id: str):
+async def direct_process_document(
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
 
     patient_doc = await _resolve_patient(doc["patient_id"])
+    if current_user:
+        verify_patient_ownership(str(patient_doc["_id"]), current_user)
+
     return await _process_document_internal(patient_doc, doc)
 
 
 @documents_direct_router.get("/{document_id}/ocr", response_model=OCRResultResponse)
-async def direct_get_document_ocr(document_id: str):
+async def direct_get_document_ocr(
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+
+    if current_user:
+        verify_patient_ownership(str(doc["patient_id"]), current_user)
+
     return OCRResultResponse(
         document_id=document_id,
         patient_id=str(doc["patient_id"]),
@@ -581,11 +719,18 @@ async def direct_get_document_ocr(document_id: str):
 
 
 @documents_direct_router.get("/{document_id}/extracted-data", response_model=ExtractedMedicalData)
-async def direct_get_document_extracted_data(document_id: str):
+async def direct_get_document_extracted_data(
+    document_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     docs_col = get_documents_collection()
     doc = await docs_col.find_one({"document_id": document_id})
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document '{document_id}' not found.")
+
+    if current_user:
+        verify_patient_ownership(str(doc["patient_id"]), current_user)
+
     extracted = doc.get("extracted_data")
     if not extracted:
         raise HTTPException(status_code=404, detail="Document has not been processed yet.")

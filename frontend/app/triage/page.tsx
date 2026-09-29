@@ -23,6 +23,7 @@ import {
   ShieldCheck,
   UserCheck,
 } from "lucide-react";
+import { getAuthHeaders } from "@/lib/auth";
 
 interface TriageAlert {
   alert_id: string;
@@ -84,7 +85,10 @@ export default function TriageDashboardPage() {
         url += `?${params.toString()}`;
       }
 
-      const res = await fetch(url, { cache: "no-store" });
+      const res = await fetch(url, {
+        cache: "no-store",
+        headers: getAuthHeaders(),
+      });
       if (!res.ok) {
         throw new Error(`Failed to fetch triage alerts (${res.status})`);
       }
@@ -122,7 +126,7 @@ export default function TriageDashboardPage() {
       const notes = staffNotesMap[alertId] || "";
       const res = await fetch(`http://127.0.0.1:8000/api/triage/alerts/${encodeURIComponent(alertId)}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           status: newStatus,
           staff_id: staffName.trim() || "Staff Nurse",

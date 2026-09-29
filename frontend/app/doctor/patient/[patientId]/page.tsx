@@ -34,6 +34,7 @@ import {
   Info,
   FolderOpen,
 } from "lucide-react";
+import { getAuthHeaders } from "@/lib/auth";
 
 interface PatientClinicalDetail {
   patient: Record<string, any>;
@@ -125,6 +126,12 @@ interface PatientClinicalDetail {
     }>;
     original_ai_draft?: string | null;
   };
+  ayush_history?: {
+    has_ayush_history: boolean;
+    total_ayush_answers: number;
+    structured_data: any;
+    answers: any[];
+  } | null;
 }
 
 function PatientReviewContent() {
@@ -157,6 +164,7 @@ function PatientReviewContent() {
     timeline: true,
     conflicts: true,
     summary: true,
+    ayush: true,
   });
 
   // History Drawer State
@@ -169,6 +177,7 @@ function PatientReviewContent() {
     try {
       const res = await fetch(`http://127.0.0.1:8000/api/doctor/patients/${encodeURIComponent(patientId)}`, {
         cache: "no-store",
+        headers: getAuthHeaders(),
       });
       if (!res.ok) {
         throw new Error(`Failed to load patient clinical dossier (${res.status})`);
@@ -198,7 +207,7 @@ function PatientReviewContent() {
     try {
       const res = await fetch(`http://127.0.0.1:8000/api/doctor/patients/${encodeURIComponent(patientId)}/summary`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           summary_draft: editedDraft,
           physician_notes: physicianNotes,
@@ -223,7 +232,7 @@ function PatientReviewContent() {
     try {
       const res = await fetch(`http://127.0.0.1:8000/api/doctor/patients/${encodeURIComponent(patientId)}/summary/confirm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           doctor_notes: confirmDoctorNotes,
           confirmed_by: "Attending Physician",
@@ -246,7 +255,7 @@ function PatientReviewContent() {
     try {
       const res = await fetch(`http://127.0.0.1:8000/api/doctor/patients/${encodeURIComponent(patientId)}/review-status`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: getAuthHeaders(),
         body: JSON.stringify({ review_status: newStatus }),
       });
       if (!res.ok) {
@@ -901,6 +910,110 @@ function PatientReviewContent() {
           </div>
         )}
       </div>
+
+      {/* SECTION 9 — AYUSH CLINICAL HISTORY & DASHAVIDHA PARIKSHA */}
+      {dossier.ayush_history?.has_ayush_history && (
+        <div className="bg-white border-2 border-emerald-300 rounded-3xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center justify-between border-b border-emerald-100 pb-3">
+            <div className="flex items-center space-x-2.5">
+              <span className="text-xl">🌿</span>
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-emerald-950">
+                  Section 9: AYUSH Clinical History &amp; Dashavidha Pariksha
+                </h2>
+                <p className="text-xs text-emerald-700">
+                  Classical Holistic Intake &bull; {dossier.ayush_history.total_ayush_answers} Patient Responses &bull; Strictly Non-Diagnostic
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => toggleSection("ayush")}
+              className="text-slate-400 hover:text-slate-600"
+            >
+              {expandedSections.ayush ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+            </button>
+          </div>
+
+          {expandedSections.ayush && (
+            <div className="space-y-4 text-xs">
+              {/* Dashavidha Pariksha 10-Fold Assessment Matrix */}
+              <div className="bg-emerald-50/60 border border-emerald-200 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-emerald-900 text-sm uppercase tracking-wide">
+                    Dashavidha Pariksha (10-Fold Clinical Framework)
+                  </span>
+                  <span className="text-[11px] font-mono text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-full font-bold">
+                    Patient-Reported &bull; Physician Discretion
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                  {dossier.ayush_history.structured_data?.dashavidha_pariksha &&
+                    Object.entries(dossier.ayush_history.structured_data.dashavidha_pariksha).map(([key, val]) => (
+                      <div key={key} className="p-2.5 bg-white border border-emerald-200 rounded-xl space-y-0.5">
+                        <span className="font-bold uppercase tracking-wider text-[10px] text-emerald-700 block">
+                          {key.replace(/_/g, " ")}
+                        </span>
+                        <span className="text-slate-800 font-medium">
+                          {String(val || "Not evaluated")}
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* Core AYUSH Parameters Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold uppercase text-slate-500 block">Agni (Digestion)</span>
+                  <span className="font-bold text-slate-800 text-xs">
+                    {dossier.ayush_history.structured_data?.agni || "Not reported"}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold uppercase text-slate-500 block">Koshta (Bowel)</span>
+                  <span className="font-bold text-slate-800 text-xs">
+                    {dossier.ayush_history.structured_data?.koshta || "Not reported"}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold uppercase text-slate-500 block">Ahara (Diet)</span>
+                  <span className="font-bold text-slate-800 text-xs">
+                    {dossier.ayush_history.structured_data?.ahara || "Not reported"}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="text-[10px] font-bold uppercase text-slate-500 block">Nidra (Sleep)</span>
+                  <span className="font-bold text-slate-800 text-xs">
+                    {dossier.ayush_history.structured_data?.nidra || "Not reported"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Verbatim AYUSH Responses */}
+              {dossier.ayush_history.answers?.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-slate-100">
+                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                    Patient-Reported AYUSH Responses ({dossier.ayush_history.answers.length})
+                  </span>
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    {dossier.ayush_history.answers.map((ans, idx) => (
+                      <div key={idx} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                        <div className="flex items-center justify-between text-[11px] text-slate-500">
+                          <span className="font-semibold text-teal-800">{ans.question_text}</span>
+                          <span className="font-mono text-[10px]">{ans.section}</span>
+                        </div>
+                        <p className="font-bold text-slate-900 text-xs">{ans.patient_answer}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 9. SECTION 8 — AI CLINICAL SUMMARY & PHYSICIAN REVIEW */}
       <div className="bg-white border-2 border-slate-200 rounded-3xl p-6 shadow-md space-y-5">

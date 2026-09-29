@@ -17,7 +17,10 @@ import {
   Check,
   Stethoscope,
   Lock,
+  ShieldAlert,
+  History,
 } from "lucide-react";
+import { getAuthHeaders } from "@/lib/auth";
 
 interface Patient {
   id: string;
@@ -30,6 +33,17 @@ interface Patient {
   selected_language?: string;
   consent_status?: string;
   consent_timestamp?: string;
+}
+
+interface ConsentRecord {
+  consent_id: string;
+  patient_id: string;
+  session_id?: string;
+  consent_type: string;
+  status: string;
+  timestamp: string;
+  language: string;
+  revocation_reason?: string;
 }
 
 interface LanguageInfo {
@@ -155,10 +169,58 @@ function ConsentComponent() {
   const [selectedLanguage, setSelectedLanguage] = useState<"en" | "hi">("en");
   const [availableLanguages, setAvailableLanguages] = useState<LanguageInfo[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [consentResult, setConsentResult] = useState<"granted" | "declined" | null>(null);
+  const [consentResult, setConsentResult] = useState<"granted" | "declined" | "revoked" | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Phase 12: Traceable Consent Lifecycle State
+  const [consentHistory, setConsentHistory] = useState<ConsentRecord[]>([]);
+  const [showRevokeModal, setShowRevokeModal] = useState<boolean>(false);
+  const [revokeReason, setRevokeReason] = useState<string>("");
+  const [isRevoking, setIsRevoking] = useState<boolean>(false);
+
   const t = CONTENT[selectedLanguage];
+
+  const fetchConsentHistory = async (pid: string) => {
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/patients/${pid}/consent/history`, {
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setConsentHistory(data.history || []);
+        if (data.current_status && ["granted", "declined", "revoked"].includes(data.current_status)) {
+          setConsentResult(data.current_status as any);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load consent history", e);
+    }
+  };
+
+  const handleRevokeConsent = async () => {
+    if (!patient || !revokeReason.trim()) return;
+    setIsRevoking(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/patients/${patient.id}/consent/revoke`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ reason: revokeReason.trim() }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to revoke consent");
+      }
+      setShowRevokeModal(false);
+      setRevokeReason("");
+      setConsentResult("revoked");
+      await fetchConsentHistory(patient.id);
+    } catch (err: any) {
+      setErrorMessage(err.message || "Failed to revoke consent");
+    } finally {
+      setIsRevoking(false);
+    }
+  };
 
   // Fetch supported languages from backend
   useEffect(() => {
@@ -183,7 +245,9 @@ function ConsentComponent() {
       setLoadingPatient(true);
       setErrorMessage(null);
       try {
-        const res = await fetch(`http://127.0.0.1:8000/api/patients/${patientIdParam}`);
+        const res = await fetch(`http://127.0.0.1:8000/api/patients/${patientIdParam}`, {
+          headers: getAuthHeaders(),
+        });
         if (!res.ok) {
           throw new Error("Patient record not found in database.");
         }
@@ -192,9 +256,10 @@ function ConsentComponent() {
         if (data.selected_language === "hi" || data.selected_language === "en") {
           setSelectedLanguage(data.selected_language);
         }
-        if (data.consent_status === "granted" || data.consent_status === "declined") {
-          setConsentResult(data.consent_status as "granted" | "declined");
+        if (data.consent_status === "granted" || data.consent_status === "declined" || data.consent_status === "revoked") {
+          setConsentResult(data.consent_status as any);
         }
+        fetchConsentHistory(data.id);
       } catch (err: any) {
         setErrorMessage(err.message || "Could not fetch patient record.");
       } finally {
@@ -352,6 +417,114 @@ function ConsentComponent() {
             >
               <span>{t.returnHomeBtn}</span>
             </Link>
+          </div>
+
+          {/* Phase 12: Revocation Option */}
+          <div className="pt-4 border-t border-slate-100 flex flex-col items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowRevokeModal(true)}
+              className="text-xs font-semibold text-rose-600 hover:text-rose-800 hover:underline flex items-center space-x-1"
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              <span>Withdraw / Revoke Consent (सहमति वापस लें)</span>
+            </button>
+            <span className="text-[11px] text-slate-400">
+              You can withdraw consent at any time. Your OPD appointment remains fully valid.
+            </span>
+          </div>
+        </div>
+
+        {/* Revoke Modal */}
+        {showRevokeModal && (
+          <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-4 border border-slate-100">
+              <div className="w-12 h-12 bg-rose-100 text-rose-600 rounded-2xl flex items-center justify-center">
+                <ShieldAlert className="w-6 h-6" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-900">Withdraw Consent / सहमति वापस लें</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Withdrawing consent pauses AI-assisted clinical intake. Your doctor will take your complete clinical history manually during your consultation.
+              </p>
+              <div>
+                <label className="text-xs font-bold text-slate-700 block mb-1">
+                  Reason for withdrawal / सहमति वापस लेने का कारण: <span className="text-rose-500">*</span>
+                </label>
+                <textarea
+                  value={revokeReason}
+                  onChange={(e) => setRevokeReason(e.target.value)}
+                  placeholder="e.g. Prefer in-person consultation with physician..."
+                  className="w-full p-3 border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-rose-500 text-slate-900"
+                  rows={3}
+                />
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowRevokeModal(false)}
+                  className="flex-1 py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs"
+                >
+                  Cancel / रद्द करें
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRevokeConsent}
+                  disabled={!revokeReason.trim() || isRevoking}
+                  className="flex-1 py-2.5 px-4 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold text-xs disabled:opacity-50"
+                >
+                  {isRevoking ? "Withdrawing..." : "Confirm Revoke"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // 1b. RESULT SCREEN: CONSENT REVOKED
+  if (consentResult === "revoked" && patient) {
+    return (
+      <div className="max-w-2xl mx-auto py-8 space-y-6">
+        <div className="bg-white border-2 border-rose-400 rounded-3xl p-8 shadow-xl text-center space-y-6">
+          <div className="w-20 h-20 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
+            <ShieldAlert className="w-12 h-12" />
+          </div>
+
+          <div className="space-y-2">
+            <span className="inline-block bg-rose-100 text-rose-900 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">
+              Consent Revoked / सहमति वापस ली गई
+            </span>
+            <h1 className="text-3xl font-black text-slate-900">Consent Withdrawn</h1>
+            <p className="text-sm text-slate-600">
+              AI clinical intake has been paused for this patient as per your request.
+            </p>
+          </div>
+
+          <div className="bg-rose-50 border border-rose-200 rounded-2xl p-5 text-left text-sm text-rose-950 space-y-2">
+            <div className="font-bold flex items-center space-x-2 text-rose-900">
+              <Info className="w-5 h-5 text-rose-700" />
+              <span>OPD Registration & Token Active</span>
+            </div>
+            <p className="text-xs sm:text-sm text-rose-900 leading-relaxed">
+              Your appointment token ({patient.token_number}) remains 100% active. Your attending doctor will conduct your case-taking manually in person.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+            <Link
+              href="/queue"
+              className="w-full py-4 px-6 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold text-base shadow-md flex items-center justify-center space-x-2 transition"
+            >
+              <span>{t.viewQueueBtn}</span>
+              <ChevronRight className="w-5 h-5" />
+            </Link>
+            <button
+              onClick={() => setConsentResult(null)}
+              className="w-full py-4 px-6 bg-white border-2 border-slate-300 hover:bg-slate-50 text-slate-700 rounded-xl font-bold text-base shadow-sm transition"
+            >
+              Renew / Re-Grant Consent
+            </button>
           </div>
         </div>
       </div>
@@ -634,6 +807,58 @@ function ConsentComponent() {
             </p>
           )}
         </div>
+      </div>
+
+      {/* Phase 12: Traceable Consent Audit Trail */}
+      {consentHistory.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 shadow-sm space-y-4">
+          <div className="flex items-center space-x-2 border-b border-slate-100 pb-3">
+            <History className="w-5 h-5 text-teal-600" />
+            <h3 className="text-base font-bold text-slate-900">
+              Consent Lifecycle History / सहमति इतिहास
+            </h3>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {consentHistory.map((rec) => (
+              <div key={rec.consent_id} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between text-xs gap-1">
+                <div className="flex items-center space-x-2">
+                  <span
+                    className={`px-2 py-0.5 rounded-full font-bold uppercase tracking-wider text-[10px] ${
+                      rec.status === "granted"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : rec.status === "revoked"
+                        ? "bg-rose-100 text-rose-800"
+                        : "bg-amber-100 text-amber-800"
+                    }`}
+                  >
+                    {rec.status}
+                  </span>
+                  <span className="font-mono text-slate-500">{rec.consent_id}</span>
+                  {rec.revocation_reason && (
+                    <span className="text-rose-700 italic">"{rec.revocation_reason}"</span>
+                  )}
+                </div>
+                <div className="text-slate-400 font-mono text-[11px]">
+                  {new Date(rec.timestamp).toLocaleString()} ({rec.language.toUpperCase()})
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Phase 12: Privacy & Interoperability Architecture Card */}
+      <div className="bg-slate-900 text-white rounded-3xl p-6 sm:p-8 shadow-sm space-y-3">
+        <div className="flex items-center space-x-2 text-teal-400">
+          <Lock className="w-5 h-5" />
+          <h3 className="text-sm font-bold uppercase tracking-wider">
+            MediKiosk Privacy & Audit Architecture
+          </h3>
+        </div>
+        <p className="text-xs text-slate-300 leading-relaxed">
+          All consent actions, interview answers, and document views are recorded in an append-only security ledger.
+          MediKiosk strictly enforces physician-in-the-loop oversight. AI provides structured case summarization only and never autonomously diagnoses.
+        </p>
       </div>
     </div>
   );

@@ -82,3 +82,4 @@ class PatientClinicalDetailResponse(BaseModel):
     summary: Dict[str, Any]
     conflicts: List[Dict[str, Any]]
     review_info: Dict[str, Any]
+    ayush_history: Optional[Dict[str, Any]] = None

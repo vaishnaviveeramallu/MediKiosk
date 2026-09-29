@@ -1,13 +1,22 @@
 from typing import List, Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Depends
 from bson import ObjectId
 from bson.errors import InvalidId
 
 import uuid
-from app.database import get_patients_collection, db_manager
+from app.database import get_patients_collection, get_users_collection, db_manager
 from app.models.patient import PatientCreate, PatientResponse, ConsentRequest
+from app.models.consent import (
+    ConsentRevokeRequest,
+    ConsentCheckResponse,
+    ConsentHistoryResponse,
+)
+from app.models.audit import AuditEventType
+from app.services.consent_service import consent_service
+from app.services.audit_service import audit_service
 from app.utils.token_generator import generate_opd_token
+from app.utils.auth_deps import get_current_user_optional, verify_patient_ownership
 
 router = APIRouter(prefix="/api", tags=["patients"])
 
@@ -37,7 +46,10 @@ async def health_check():
     summary="Register a new patient",
     description="Registers a patient dynamically into the MongoDB database and generates an OPD token.",
 )
-async def register_patient(payload: PatientCreate):
+async def register_patient(
+    payload: PatientCreate,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patients_col = get_patients_collection()
 
     token = await generate_opd_token()
@@ -58,6 +70,8 @@ async def register_patient(payload: PatientCreate):
         "initial_complaint": payload.initial_complaint,
         "registration_status": "registered",
         "created_at": now,
+        # User account link if authenticated
+        "user_id": current_user.get("user_id") if current_user else None,
         # Extensible placeholders for future phases
         "consent_given": None,
         "consent_timestamp": None,
@@ -70,6 +84,25 @@ async def register_patient(payload: PatientCreate):
 
     result = await patients_col.insert_one(patient_doc)
     patient_doc["_id"] = result.inserted_id
+
+    # If registered by authenticated patient user, link back
+    if current_user and current_user.get("role") == "patient":
+        users_col = get_users_collection()
+        await users_col.update_one(
+            {"user_id": current_user["user_id"]},
+            {"$set": {"patient_id": str(result.inserted_id)}},
+        )
+
+    # Log audit event
+    await audit_service.log_event(
+        action=AuditEventType.PATIENT_REGISTER.value,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "anonymous_kiosk",
+        patient_id=str(result.inserted_id),
+        resource_type="patient",
+        resource_id=str(result.inserted_id),
+        details={"token_number": token, "has_auth_link": bool(current_user)},
+    )
 
     return serialize_patient(patient_doc)
 
@@ -84,6 +117,7 @@ async def list_patients(
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     search: Optional[str] = Query(None, description="Search by name, token, or phone number"),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
     patients_col = get_patients_collection()
 
@@ -95,6 +129,17 @@ async def list_patients(
             {"token_number": {"$regex": term, "$options": "i"}},
             {"phone_number": {"$regex": term, "$options": "i"}},
         ]
+
+    # If authenticated patient user requests list, only return their own record
+    if current_user and current_user.get("role") == "patient":
+        user_pid = current_user.get("patient_id")
+        if user_pid:
+            try:
+                query_filter["_id"] = ObjectId(user_pid)
+            except Exception:
+                query_filter["token_number"] = user_pid
+        else:
+            return []
 
     cursor = patients_col.find(query_filter).sort("created_at", -1).skip(skip).limit(limit)
     documents = await cursor.to_list(length=limit)
@@ -108,14 +153,16 @@ async def list_patients(
     summary="Get patient details",
     description="Fetches a single patient record by MongoDB ObjectId or OPD token number.",
 )
-async def get_patient(patient_id: str):
+async def get_patient(
+    patient_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patients_col = get_patients_collection()
 
     query_filter = None
     try:
         query_filter = {"_id": ObjectId(patient_id)}
     except InvalidId:
-        # If not a valid ObjectId, try finding by token_number
         query_filter = {"token_number": patient_id.upper()}
 
     doc = await patients_col.find_one(query_filter)
@@ -124,6 +171,10 @@ async def get_patient(patient_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Patient with identifier '{patient_id}' not found",
         )
+
+    # IDOR ownership enforcement
+    if current_user:
+        verify_patient_ownership(str(doc["_id"]), current_user)
 
     return serialize_patient(doc)
 
@@ -134,7 +185,11 @@ async def get_patient(patient_id: str):
     summary="Record patient consent and language preference",
     description="Dynamically records patient consent decision (granted or declined) and selected language into MongoDB.",
 )
-async def record_patient_consent(patient_id: str, payload: ConsentRequest):
+async def record_patient_consent(
+    patient_id: str,
+    payload: ConsentRequest,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
     patients_col = get_patients_collection()
 
     query_filter = None
@@ -150,38 +205,133 @@ async def record_patient_consent(patient_id: str, payload: ConsentRequest):
             detail=f"Patient with identifier '{patient_id}' not found",
         )
 
-    now = datetime.now(timezone.utc)
+    # IDOR ownership enforcement
+    if current_user:
+        verify_patient_ownership(str(existing_doc["_id"]), current_user)
+
+    resolved_pid = str(existing_doc["_id"])
     session_id = payload.session_id or f"ses_{uuid.uuid4().hex[:12]}"
-    consent_granted = (payload.consent_status == "granted")
-    new_status = "consent_granted" if consent_granted else "consent_declined"
 
-    audit_entry = {
-        "action": "consent_recorded",
-        "consent_status": payload.consent_status,
-        "selected_language": payload.selected_language,
-        "timestamp": now,
-        "session_id": session_id,
-    }
-
-    update_fields = {
-        "selected_language": payload.selected_language,
-        "consent_status": payload.consent_status,
-        "consent_given": consent_granted,
-        "consent_timestamp": now,
-        "session_id": session_id,
-        "registration_status": new_status,
-    }
-
-    await patients_col.update_one(
-        {"_id": existing_doc["_id"]},
-        {
-            "$set": update_fields,
-            "$push": {"consent_history": audit_entry},
-        },
+    await consent_service.record_consent(
+        patient_id=resolved_pid,
+        session_id=session_id,
+        consent_type="general_medical_intake",
+        status=payload.consent_status,
+        language=payload.selected_language,
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
     )
 
     updated_doc = await patients_col.find_one({"_id": existing_doc["_id"]})
     return serialize_patient(updated_doc)
+
+
+@router.post(
+    "/patients/{patient_id}/consent/revoke",
+    summary="Revoke patient intake consent",
+    description="Withdraws/revokes patient consent with a documented reason. Halts clinical processing until re-consented.",
+)
+async def revoke_patient_consent(
+    patient_id: str,
+    payload: ConsentRevokeRequest,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    patients_col = get_patients_collection()
+    query_filter = None
+    try:
+        query_filter = {"_id": ObjectId(patient_id)}
+    except InvalidId:
+        query_filter = {"token_number": patient_id.upper()}
+
+    existing_doc = await patients_col.find_one(query_filter)
+    if not existing_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Patient with identifier '{patient_id}' not found",
+        )
+
+    if current_user:
+        verify_patient_ownership(str(existing_doc["_id"]), current_user)
+
+    resolved_pid = str(existing_doc["_id"])
+    record = await consent_service.revoke_consent(
+        patient_id=resolved_pid,
+        reason=payload.reason,
+        consent_type=payload.consent_type or "general_medical_intake",
+        actor_user_id=current_user.get("user_id") if current_user else None,
+        actor_role=current_user.get("role") if current_user else "patient",
+    )
+
+    return {
+        "status": "revoked",
+        "patient_id": resolved_pid,
+        "consent_id": record.consent_id,
+        "reason": record.revocation_reason,
+        "timestamp": record.timestamp.isoformat(),
+        "can_proceed_clinical": False,
+    }
+
+
+@router.get(
+    "/patients/{patient_id}/consent/history",
+    response_model=ConsentHistoryResponse,
+    summary="Get patient consent history",
+    description="Retrieves the immutable chronological trail of consent events for this patient.",
+)
+async def get_patient_consent_history(
+    patient_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    patients_col = get_patients_collection()
+    query_filter = None
+    try:
+        query_filter = {"_id": ObjectId(patient_id)}
+    except InvalidId:
+        query_filter = {"token_number": patient_id.upper()}
+
+    existing_doc = await patients_col.find_one(query_filter)
+    if not existing_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Patient with identifier '{patient_id}' not found",
+        )
+
+    if current_user:
+        verify_patient_ownership(str(existing_doc["_id"]), current_user)
+
+    resolved_pid = str(existing_doc["_id"])
+    return await consent_service.get_consent_history(resolved_pid)
+
+
+@router.get(
+    "/patients/{patient_id}/consent/check",
+    response_model=ConsentCheckResponse,
+    summary="Check active patient consent status",
+    description="Pre-flight verification gate for downstream clinical flows (interview, documents, summary).",
+)
+async def check_patient_consent_status(
+    patient_id: str,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    patients_col = get_patients_collection()
+    query_filter = None
+    try:
+        query_filter = {"_id": ObjectId(patient_id)}
+    except InvalidId:
+        query_filter = {"token_number": patient_id.upper()}
+
+    existing_doc = await patients_col.find_one(query_filter)
+    if not existing_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Patient with identifier '{patient_id}' not found",
+        )
+
+    if current_user:
+        verify_patient_ownership(str(existing_doc["_id"]), current_user)
+
+    resolved_pid = str(existing_doc["_id"])
+    return await consent_service.check_consent(resolved_pid)
 
 
 @router.get(

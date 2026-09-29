@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     CORS_ORIGINS: Union[List[str], str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
+    # Authentication & JWT Configuration
+    JWT_SECRET_KEY: str = "medikiosk_dev_super_secret_jwt_key_2026"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+
     # AI Service Configuration
     AI_API_KEY: Union[str, None] = None
     AI_MODEL: str = "gemini-1.5-flash"
@@ -31,6 +36,22 @@ class Settings(BaseSettings):
     OCR_MAX_PAGES: int = 10
     OCR_TIMEOUT_SECONDS: float = 30.0
     OCR_DEFAULT_LANGUAGES: str = "eng+hin"
+
+    # ABDM / ABHA Integration Configuration
+    ABDM_CLIENT_ID: Union[str, None] = None
+    ABDM_CLIENT_SECRET: Union[str, None] = None
+    ABDM_BASE_URL: Union[str, None] = None
+    ABDM_BRIDGE_URL: Union[str, None] = None
+
+    # FHIR Server Configuration
+    FHIR_SERVER_URL: Union[str, None] = None
+    FHIR_API_KEY: Union[str, None] = None
+    FHIR_VERSION: str = "R4"
+
+    # Hospital Information System (HIS) / EMR Configuration
+    HIS_EMR_BASE_URL: Union[str, None] = None
+    HIS_EMR_API_KEY: Union[str, None] = None
+    HIS_EMR_HOSPITAL_ID: Union[str, None] = None
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

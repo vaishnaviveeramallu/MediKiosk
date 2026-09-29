@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status, Depends
 
 from app.models.doctor import (
     DoctorQueueResponse,
@@ -12,10 +12,15 @@ from app.models.doctor import (
 from app.services.doctor_service import doctor_service
 from app.services.medical_timeline_service import medical_timeline_service
 from app.services.clinical_summary_service import clinical_summary_service
+from app.utils.auth_deps import require_role
 
 logger = logging.getLogger("medikiosk.doctor_routes")
 
-router = APIRouter(prefix="/api/doctor", tags=["doctor-dashboard"])
+router = APIRouter(
+    prefix="/api/doctor",
+    tags=["doctor-dashboard"],
+    dependencies=[Depends(require_role(["doctor"]))],
+)
 
 
 @router.get(
